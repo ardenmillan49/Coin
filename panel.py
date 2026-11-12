@@ -2,13 +2,14 @@
 from decimal import Decimal
 import bot
 import live
+import withdrawals
 
 HOME = [
     [("الميزانية", "budget"), ("هدف الربح", "target")],
     [("المحفظة", "/wallet"), ("فحص الجاهزية", "/ready")],
     [("شراء حقيقي", "/buy"), ("حالة التداول", "/live")],
     [("بيع حقيقي الآن", "/exit"), ("إلغاء طلب الشراء", "/unarm")],
-    [("المحاكاة", "paper")],
+    [("سحب SOL", "withdraw"), ("المحاكاة", "paper")],
 ]
 PAPER = [
     [("مراقبة عملة", "/watch"), ("فحص عملة", "/inspect")],
@@ -33,7 +34,14 @@ def state(db, key):
     return db.execute("SELECT * FROM panels WHERE bot=?", (key,)).fetchone()
 
 
-def buttons(view):
+def buttons(view, draft=""):
+    if view.startswith("withdraw_"):
+        rows = []
+        if view == "withdraw_amount":
+            rows.append([("سحب كامل الرصيد بعد الرسم","wd_all")])
+        elif view == "withdraw_review":
+            rows.append([("تأكيد السحب","wd_ok:"+draft)])
+        return rows + [[("إلغاء","home")]]
     if view not in FIELDS:
         return PAPER if view == "paper" else HOME
     rows = [[(d, view + ":" + d) for d in digits] for digits in ("123", "456", "789", ".0")]
@@ -51,9 +59,17 @@ def render(db, key, note):
     text = f"{title}\n\nالميزانية: {budget}\nهدف الربح للبيع: {target}"
     if view in FIELDS:
         text += f"\n\n{FIELDS[view]}: {current['draft'] or '…'}"
+    if view == "withdraw_address":
+        text += "\n\nابعت عنوان محفظتك الرئيسية على شبكة Solana."
+    if view == "withdraw_amount":
+        text += "\n\nالوجهة:\n" + current["draft"] + "\nابعت مبلغ السحب بـ SOL أو اختار كامل الرصيد."
+    if view == "withdraw_review":
+        quote = db.execute("SELECT * FROM withdrawals WHERE id=? AND bot=?", (current["draft"],key)).fetchone()
+        if quote:
+            text += "\n\n" + withdrawals.preview(quote)
     if note:
         text += "\n\n" + note
-    keyboard = [[{"text":label, "callback_data":value} for label,value in row] for row in buttons(view)]
+    keyboard = [[{"text":label, "callback_data":value} for label,value in row] for row in buttons(view,current["draft"])]
     return {"text":text[:4096], "reply_markup":{"inline_keyboard":keyboard}}
 
 
@@ -64,6 +80,7 @@ def reset_input(db,key):
 
 def home(db,key,view="home"):
     state(db,key)
+    db.execute("DELETE FROM withdrawals WHERE bot=? AND state='review'", (key,))
     db.execute("UPDATE panels SET view=?,draft='' WHERE bot=?", (view,key))
     reset_input(db,key)
 
@@ -87,11 +104,39 @@ def save(db,key,view,value):
 def handle(db,key,action,callback):
     current = state(db,key)
     view = current["view"]
-    if callback and action not in {v for row in buttons(view) for _,v in row}:
+    if callback and action not in {v for row in buttons(view,current["draft"]) for _,v in row}:
         return "اللوحة تغيّرت. اختار من الأزرار الظاهرة."
     if action in ("/start","/help") or (callback and action in ("home","paper")):
         home(db,key,"paper" if action=="paper" else "home")
         return ""
+    if callback and action == "withdraw":
+        pending = withdrawals.pending(db)
+        if pending:
+            return "في سحب بانتظار التأكيد. التوقيع:\n" + pending["signature"]
+        if live.active(db,key):
+            return "رصيد المحفظة مخصص لصفقة حقيقية قيد التنفيذ."
+        if not db.execute("SELECT 1 FROM live_settings WHERE bot=?", (key,)).fetchone():
+            return "افتح «المحفظة» أول مرة."
+        home(db,key,"withdraw_address")
+        return ""
+    if view.startswith("withdraw_"):
+        if not callback and action.startswith("/"):
+            home(db,key)
+            return None
+        if view == "withdraw_address" and not callback:
+            wallet = db.execute("SELECT wallet FROM live_settings WHERE bot=?", (key,)).fetchone()[0]
+            address = withdrawals.destination(action,wallet)
+            db.execute("UPDATE panels SET view='withdraw_amount',draft=? WHERE bot=?",(address,key))
+            return ""
+        if view == "withdraw_amount":
+            identifier = withdrawals.quote(db,key,current["draft"],"all" if callback else action)
+            db.execute("UPDATE panels SET view='withdraw_review',draft=? WHERE bot=?",(identifier,key))
+            return ""
+        if view == "withdraw_review" and callback and action == "wd_ok:"+current["draft"]:
+            result = withdrawals.confirm(db,key,current["draft"])
+            home(db,key)
+            return result
+        return "راجع المعاينة واختار تأكيد أو إلغاء."
     if callback and action in FIELDS:
         if live.active(db,key):
             return "في صفقة حقيقية قيد التنفيذ."

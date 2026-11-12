@@ -1,6 +1,7 @@
 """Persist every signed transaction before broadcast; advance only from finalized receipts."""
 from decimal import Decimal, InvalidOperation
 import bot
+import withdrawals
 import time
 
 N = 50
@@ -13,6 +14,7 @@ STAGES = {"planned": "بانتظار العقد", "buy": "بانتظار الش�
 
 
 def init(db):
+    withdrawals.init(db)
     db.executescript("""
         CREATE TABLE IF NOT EXISTS live_settings (
             bot INTEGER PRIMARY KEY, wallet TEXT, budget INTEGER, target INTEGER, prompt TEXT);
@@ -149,6 +151,8 @@ def command(db, key, text):
     mint = str(chain.pk(text.strip()))
     if row:
         return status(row)
+    if withdrawals.pending(db):
+        return "في سحب قيد التأكيد. انتظر نتيجته قبل الشراء."
     db.execute("INSERT INTO campaigns(bot,wallet,mint,budget,target,stage) VALUES(?,?,?,?,?,'buy')",
                (key,cfg["wallet"],mint,cfg["budget"],cfg["target"]))
     db.execute("UPDATE live_settings SET prompt=NULL WHERE bot=?", (key,))
