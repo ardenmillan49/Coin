@@ -6,6 +6,7 @@ import json
 import os
 import sqlite3
 import struct
+import sys
 import time
 from dataclasses import dataclass
 import urllib.error
@@ -140,6 +141,16 @@ def exit_quote(reserves, units, net, tx_fee, bps):
     return gross - fee(gross, bps) - tx_fee
 
 
+def open_db(path):
+    db = sqlite3.connect(path)
+    db.row_factory = sqlite3.Row
+    db.execute("""CREATE TABLE IF NOT EXISTS positions (
+        id INTEGER PRIMARY KEY, mint TEXT, units INTEGER, net INTEGER,
+        cost INTEGER, tx_fee INTEGER, bps INTEGER, proceeds INTEGER)""")
+    db.execute("CREATE UNIQUE INDEX IF NOT EXISTS one_open ON positions((1)) WHERE proceeds IS NULL")
+    return db
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--db", default="paper.sqlite")
@@ -161,12 +172,7 @@ def main():
             raise ValueError("Curve unavailable")
         print(json.dumps(holder_report(args.mint, curve), indent=2))
         return
-    db = sqlite3.connect(args.db)
-    db.row_factory = sqlite3.Row
-    db.execute("""CREATE TABLE IF NOT EXISTS positions (
-        id INTEGER PRIMARY KEY, mint TEXT, units INTEGER, net INTEGER,
-        cost INTEGER, tx_fee INTEGER, bps INTEGER, proceeds INTEGER)""")
-    db.execute("CREATE UNIQUE INDEX IF NOT EXISTS one_open ON positions((1)) WHERE proceeds IS NULL")
+    db = open_db(args.db)
     pos = db.execute("SELECT * FROM positions WHERE proceeds IS NULL").fetchone()
     if args.command == "status":
         for row in db.execute("SELECT *, proceeds-cost AS profit_lamports FROM positions ORDER BY id"):
@@ -218,6 +224,10 @@ def main():
 
 if __name__ == "__main__":
     try:
-        main()
+        if len(sys.argv) == 1:
+            import telegram_bot
+            telegram_bot.run()
+        else:
+            main()
     except (ValueError, InvalidOperation, OSError, sqlite3.Error) as error:
         raise SystemExit(str(error))
