@@ -111,8 +111,8 @@ def check_child_signers(expected_wallet, batch_size):
     return len(addresses)
 
 
-def data_account(address, program):
-    result = bot.rpc("getAccountInfo", [str(address), dict(FINAL, encoding="base64")])["value"]
+def data_account(address, program, reader=None):
+    result = (reader or bot.rpc)("getAccountInfo", [str(address), dict(FINAL, encoding="base64")])["value"]
     if result is None:
         return None
     if result["owner"] != str(program):
@@ -120,8 +120,8 @@ def data_account(address, program):
     return base64.b64decode(result["data"][0], validate=True)
 
 
-def mint_info(mint):
-    acct = bot.rpc("getAccountInfo", [str(mint), dict(FINAL, encoding="jsonParsed")])["value"]
+def mint_info(mint, reader=None):
+    acct = (reader or bot.rpc)("getAccountInfo", [str(mint), dict(FINAL, encoding="jsonParsed")])["value"]
     if acct is None:
         return None
     program = pk(acct["owner"])
@@ -138,9 +138,9 @@ def amount(address):
     return int(bot.rpc("getTokenAccountBalance", [str(address), FINAL])["value"]["amount"])
 
 
-def market(mint):
+def market(mint, *, entry_only=False, reader=None):
     curve = pda(PUMP, b"bonding-curve", mint)
-    data = data_account(curve, PUMP)
+    data = data_account(curve, PUMP, reader) if reader else data_account(curve, PUMP)
     if data is None:
         return None
     if data[:8] != bot.TAG or len(data) < 49:
@@ -150,6 +150,8 @@ def market(mint):
     if not data[48]:
         t, s, available, _ = bot.decode(data)
         return ("curve", curve, t, s, available)
+    if entry_only:
+        return None
     authority = pda(PUMP, b"pool-authority", mint)
     pool = pda(AMM, b"pool", b"\x00\x00", authority, mint, WSOL)
     data = data_account(pool, AMM)
