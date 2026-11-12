@@ -76,3 +76,18 @@ class PaperTests(unittest.TestCase):
         self.assertEqual(curve.reserves, self.reserves)
         self.assertEqual(curve.slot, 91)
         self.assertEqual(rpc.call_args.args[1][0], curve.address)
+
+    def test_public_holder_fallback(self):
+        answer = {"context":{"slot":20},"value":[{"address":"holder"}]}
+        with patch.object(bot,"rpc",side_effect=[OSError("restricted"),answer]) as rpc:
+            self.assertEqual(bot.largest_accounts("mint",{}),answer)
+            self.assertEqual(rpc.call_args.args[0],"getTokenLargestAccounts")
+            self.assertIn("endpoint",rpc.call_args.kwargs)
+
+    def test_filtered_account_scan(self):
+        info = {"mint":"mint","tokenAmount":{"amount":"80"}}
+        account = {"pubkey":"a","account":{"data":{"parsed":{"type":"account","info":info}}}}
+        mint = {"value":{"owner":"TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"}}
+        with patch.object(bot,"rpc",side_effect=[OSError(),OSError(),mint,{"context":{"slot":20},"value":[account]}]) as rpc:
+            self.assertEqual(bot.largest_accounts("mint",{})["value"],[{"address":"a"}])
+            self.assertEqual(rpc.call_args.args[1][1]["filters"][0]["memcmp"]["bytes"],"mint")

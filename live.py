@@ -84,9 +84,9 @@ def command(db, key, text):
         chain.verify_mainnet()
         # The live entry inspection uses this RPC method; many shared endpoints restrict it.
         try:
-            bot.rpc("getTokenLargestAccounts",[str(chain.WSOL),chain.FINAL])
+            bot.largest_accounts("4a9ZHEceRAfHAribgXDsdYxfR1hqf6MrRQja9caQpump",chain.FINAL)
         except OSError:
-            return "مزود Solana RPC ما أكمل فحص أكبر الحسابات. جرّب مزود بيدعم getTokenLargestAccounts واضبط SOLANA_RPC_URL."
+            return "تعذّر فحص الحيازات عبر المسارات المتاحة. اضبط SOLANA_HOLDERS_RPC_URL بمزوّد يدعم getTokenLargestAccounts في /etc/coin-bot.env ثم أعد تشغيل الخدمة."
         reserve = reserve_for_distribution()
         check = "فحص التوقيع متاح بعد التمويل."
         if balance >= 5000:

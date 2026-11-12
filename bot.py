@@ -46,9 +46,9 @@ class Curve:
     slot: int
 
 
-def rpc(method, params):
+def rpc(method, params, *, endpoint=None):
     body = {"jsonrpc": "2.0", "id": 1, "method": method, "params": params}
-    req = urllib.request.Request(os.getenv("SOLANA_RPC_URL", "https://api.mainnet-beta.solana.com"),
+    req = urllib.request.Request(endpoint or os.getenv("SOLANA_RPC_URL", "https://api.mainnet-beta.solana.com"),
                                  data=json.dumps(body).encode(), headers={"Content-Type": "application/json"})
     with urllib.request.urlopen(req, timeout=10) as response:
         result = json.load(response)
@@ -73,9 +73,47 @@ def snapshot(mint):
     return Curve(reserves, str(address), creator, result["context"]["slot"])
 
 
+def largest_accounts(mint, config):
+    """Look up holder accounts without routing any transaction through a fallback."""
+    params = [mint, config]
+    try:
+        return rpc("getTokenLargestAccounts", params)
+    except OSError:
+        pass
+    backup = os.getenv("SOLANA_HOLDERS_RPC_URL", "https://solana-rpc.publicnode.com")
+    try:
+        return rpc("getTokenLargestAccounts", params, endpoint=backup)
+    except OSError:
+        pass
+
+    # A mint filter keeps this scan scoped to the launch being inspected.
+    mint_account = rpc("getAccountInfo", [mint, dict(config, encoding="base64", dataSlice={"offset":0,"length":0})])["value"]
+    if not mint_account or mint_account["owner"] not in (
+            "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA", "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb"):
+        raise OSError("Mint owner unavailable for holder lookup")
+    opts = dict(config, encoding="jsonParsed", withContext=True,
+                filters=[{"memcmp":{"offset":0,"bytes":mint}}])
+    try:
+        result = rpc("getProgramAccounts", [mint_account["owner"], opts])
+    except OSError:
+        result = rpc("getProgramAccounts", [mint_account["owner"], opts], endpoint=backup)
+    amounts = []
+    for item in result["value"]:
+        data = item["account"]["data"]
+        if not isinstance(data, dict) or "parsed" not in data:
+            raise OSError("Incomplete parsed token account")
+        parsed = data["parsed"]
+        if parsed["type"] == "account" and parsed["info"]["mint"] == mint:
+            amounts.append((int(parsed["info"]["tokenAmount"]["amount"]), item["pubkey"]))
+    if not amounts:
+        raise OSError("No token accounts in holder scan")
+    return {"context":result["context"],
+            "value":[{"address":addr} for _, addr in sorted(amounts, reverse=True)[:20]]}
+
+
 def holder_report(mint, curve):
     config = {"commitment": "confirmed"}
-    largest = rpc("getTokenLargestAccounts", [mint, config])
+    largest = largest_accounts(mint, config)
     slot = max(curve.slot, largest["context"]["slot"])
     parsed = dict(config, encoding="jsonParsed", minContextSlot=slot)
     addresses = [row["address"] for row in largest["value"]]
