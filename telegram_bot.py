@@ -7,6 +7,8 @@ import re
 import secrets
 import select
 import sys
+import threading
+import logging
 import sqlite3
 import tempfile
 import time
@@ -15,10 +17,12 @@ import urllib.request
 from decimal import Decimal, InvalidOperation
 
 import bot
+import live
 
 MENU = [["مراقبة عملة", "فحص عملة"], ["حالة الصفقة", "بيع تجريبي"], ["إلغاء المراقبة"]]
 ACTIONS = dict(zip(sum(MENU, []), ["/watch", "/inspect", "/status", "/sell", "/cancel"]))
-HELP = "بوت محاكاة Coin. اختار من الأزرار أو اكتب /watch أو /inspect أو /status أو /sell أو /cancel."
+MENU += [["محفظة SOL", "/ready"], ["إعداد شراء حقيقي"], ["شراء حقيقي", "حالة التداول الحقيقي"], ["بيع حقيقي الآن", "إلغاء طلب الشراء"]]
+HELP = "Coin للتداول الحقيقي والمحاكاة. اختار من الأزرار أو اكتب /watch أو /inspect أو /status أو /sell أو /cancel."
 
 
 class TelegramError(Exception):
@@ -69,6 +73,7 @@ def setup(path):
 
 
 def init_chat(db):
+    live.init(db)
     db.executescript("""
         CREATE TABLE IF NOT EXISTS telegram (
           id INTEGER PRIMARY KEY, owner INTEGER, offset INTEGER DEFAULT 0,
@@ -110,6 +115,10 @@ def sol(units):
 
 def command(db, row, text):
     key = row["id"]
+    result = live.command(db, key, text)
+    if result is not None:
+        db.execute("UPDATE telegram SET stage=NULL,draft=NULL WHERE id=?", (key,))
+        return result
     parts = ACTIONS.get(text, text).split()
     action = parts[0].split("@")[0] if parts else ""
     args = parts[1:]
@@ -261,9 +270,24 @@ def pair_from_terminal(db, key, value):
     return False
 
 
+def live_worker(path, key, stop):
+    connection = bot.open_db(path)
+    try:
+        while not stop.is_set():
+            try:
+                live.tick(connection, key)
+            except Exception:
+                logging.exception("Live worker tick failed")
+            stop.wait(1)
+    finally:
+        connection.close()
+
+
 def run_polling(config):
     key, token = config["id"], config["token"]
-    db = bot.open_db(Path(__file__).resolve().with_name("paper.sqlite"))
+    path = Path(__file__).resolve().with_name("paper.sqlite")
+    db = bot.open_db(path)
+    db.execute("PRAGMA journal_mode=WAL")
     init_chat(db)
     with db:
         db.execute("INSERT OR IGNORE INTO telegram(id) VALUES(?)", (key,))
@@ -273,6 +297,18 @@ def run_polling(config):
         print(f"Send /start in Telegram, type your numeric ID here and press Enter.\nأو افتح رابط الربط الخاص واضغط Start:\nhttps://t.me/{config['username']}?start={secret}", flush=True)
     else:
         print(f"Coin شغّال على @{config['username']}", flush=True)
+    stop = threading.Event()
+    worker = threading.Thread(target=live_worker, args=(path, key, stop), daemon=True)
+    worker.start()
+    try:
+        poll(db, key, token, secret)
+    finally:
+        stop.set()
+        worker.join(timeout=2)
+        db.close()
+
+
+def poll(db, key, token, secret):
     while True:
         try:
             tick(db, key)
@@ -295,7 +331,7 @@ def run_polling(config):
                 with db:
                     db.execute("DELETE FROM replies WHERE id=?", (reply["id"],))
             row = db.execute("SELECT offset,mint FROM telegram WHERE id=?", (key,)).fetchone()
-            for update in api(token, "getUpdates", offset=row["offset"], timeout=2 if row["mint"] or owner is None else 20,
+            for update in api(token, "getUpdates", offset=row["offset"], timeout=2 if row["mint"] or owner is None or live.active(db, key) else 20,
                               allowed_updates=["message"]):
                 receive(db, key, secret, update)
         except TelegramError as exc:
