@@ -16,6 +16,7 @@ HOME = [
     [("سحب SOL", "withdraw"), ("المحاكاة", "paper")],
 ]
 PAPER = [
+    [("العثور على عقد إطلاق", "find_launch")],
     [("مراقبة عملة", "/watch"), ("فحص عملة", "/inspect")],
     [("حالة الصفقة", "/status"), ("بيع تجريبي", "/sell")],
     [("إلغاء المراقبة", "/cancel"), ("رجوع", "home")],
@@ -133,6 +134,12 @@ def handle(db,key,action,callback):
     view = current["view"]
     if callback and action not in {v for row in buttons(view,current["draft"]) for _,v in row}:
         return "اللوحة تغيّرت. اختار من الأزرار الظاهرة."
+    if callback and action == "find_launch":
+        home(db,key,"paper")
+        db.execute("UPDATE panels SET draft='find_launch' WHERE bot=?", (key,))
+        return "عم افحص أحدث الإطلاقات على الشبكة."
+    if callback and view == "paper" and current["draft"] == "find_launch":
+        db.execute("UPDATE panels SET draft='' WHERE bot=?", (key,))
     if action == "/live":
         home(db,key,"dashboard")
         return ""

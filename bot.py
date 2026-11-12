@@ -29,7 +29,7 @@ def decode(data):
     if len(data) < 49 or data[:8] != TAG:
         raise ValueError("Unrecognized bonding curve")
     if data[48]:
-        raise ValueError("Completed curve: migrated pools are outside this version")
+        raise ValueError("اكتمل منحنى إطلاق العملة. جرّب «العثور على عقد إطلاق» من قائمة المحاكاة.")
     if any(data[83:115]):
         raise ValueError("Only SOL-quoted curves are supported")
     token, sol, available, cash, supply = struct.unpack_from("<5Q", data, 8)

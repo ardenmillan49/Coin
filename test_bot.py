@@ -21,7 +21,7 @@ class PaperTests(unittest.TestCase):
         self.assertGreater(proceeds, net * 0.98)
 
     def test_migrated(self):
-        with self.assertRaisesRegex(ValueError, "Completed"):
+        with self.assertRaisesRegex(ValueError, "اكتمل"):
             bot.decode(bot.TAG + bytes(40) + bytes([1]))
 
     def test_wait_hold_restart_sell(self):

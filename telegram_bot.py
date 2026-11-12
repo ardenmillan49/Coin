@@ -1,4 +1,5 @@
 """Private Telegram interface for the paper trader."""
+from concurrent.futures import ThreadPoolExecutor
 import getpass
 import json
 import os
@@ -355,6 +356,13 @@ def show_panel(db, key, token, reply):
 
 
 def poll(db, key, token, secret):
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        poll_updates(db, key, token, secret, executor)
+
+
+def poll_updates(db, key, token, secret, executor):
+    from launches import find
+    search = None
     next_refresh = 0
     while True:
         try:
@@ -365,6 +373,20 @@ def poll(db, key, token, secret):
                     print("Telegram account paired.", flush=True)
                     continue
                 print("Send /start and enter the numeric ID from the reply.", flush=True)
+            searching = db.execute("SELECT 1 FROM panels WHERE bot=? AND view='paper' AND draft='find_launch'", (key,)).fetchone()
+            if search and search.done():
+                try:
+                    result = search.result()
+                except Exception:
+                    logging.exception("Launch lookup failed")
+                    result = "تعذّر فحص الإطلاقات عبر مزوّد Solana. جرّب البحث مجدداً."
+                if searching and owner:
+                    with db:
+                        db.execute("UPDATE panels SET draft='' WHERE bot=?", (key,))
+                        tell(db,key,owner,result)
+                search = None
+            elif searching and search is None and owner:
+                search = executor.submit(find)
             delivered = False
             for reply in db.execute("SELECT * FROM replies WHERE bot_id=? ORDER BY id", (key,)).fetchall():
                 try:
@@ -396,7 +418,7 @@ def poll(db, key, token, secret):
                     db.execute("DELETE FROM input_cleanup WHERE bot=? AND chat=? AND message=?",
                                (key,item["chat"],item["message"]))
             row = db.execute("SELECT offset,mint FROM telegram WHERE id=?", (key,)).fetchone()
-            for update in api(token, "getUpdates", offset=row["offset"], timeout=2 if row["mint"] or owner is None or live.active(db, key) or withdrawals.pending(db) or sweep.running(db) else 20,
+            for update in api(token, "getUpdates", offset=row["offset"], timeout=2 if search or row["mint"] or owner is None or live.active(db, key) or withdrawals.pending(db) or sweep.running(db) else 20,
                               allowed_updates=["message","callback_query"]):
                 if "callback_query" in update:
                     try:
