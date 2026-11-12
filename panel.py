@@ -8,6 +8,7 @@ import withdrawals
 
 HOME = [
     [("الميزانية", "budget"), ("هدف الربح", "target")],
+    [("عدد المحافظ", "count")],
     [("المحفظة", "/wallet"), ("فحص الجاهزية", "/ready")],
     [("شراء حقيقي", "/buy"), ("لوحة الصفقة 📊", "/live")],
     [("بيع حقيقي الآن", "/exit"), ("إلغاء طلب الشراء", "/unarm")],
@@ -19,7 +20,7 @@ PAPER = [
     [("حالة الصفقة", "/status"), ("بيع تجريبي", "/sell")],
     [("إلغاء المراقبة", "/cancel"), ("رجوع", "home")],
 ]
-FIELDS = {"budget": "نسبة الشراء من رصيد الرئيسية (%)", "target": "هدف الربح للبيع (%)"}
+FIELDS = {"count": "عدد محافظ الشراء (1–50)", "budget": "نسبة الشراء من رصيد الرئيسية (%)", "target": "هدف الربح للبيع (%)"}
 
 
 def init(db):
@@ -38,6 +39,8 @@ def state(db, key):
 
 
 def buttons(view, draft=""):
+    if view == "count":
+        return [[(str(n), f"count:pick{n}") for n in group] for group in ((1,5,10),(20,30,50))] + [[("رجوع","home")]]
     if view == "dashboard":
         return [[("تحديث", "/live"), ("بيع حقيقي الآن", "/exit")], [("رجوع", "home")]]
     if view=="sweep_review":
@@ -60,12 +63,12 @@ def buttons(view, draft=""):
 
 def render(db, key, note):
     current = state(db, key)
-    cfg = db.execute("SELECT budget_bps,target FROM live_settings WHERE bot=?", (key,)).fetchone()
+    cfg = db.execute("SELECT budget_bps,target,wallet_count FROM live_settings WHERE bot=?", (key,)).fetchone()
     budget = f"{Decimal(cfg[0]) / 100}% من رصيد الرئيسية" if cfg and cfg[0] else "غير محددة"
     target = f"+{Decimal(cfg[1])/100}%" if cfg and cfg[1] else "غير محدد"
     view = current["view"]
     title = "Coin · المحاكاة" if view == "paper" else "Coin · التداول الحقيقي"
-    text = f"{title}\n\nالميزانية: {budget}\nهدف الربح للبيع: {target}"
+    text = f"{title}\n\nالميزانية: {budget}\nمحافظ الشراء: {cfg[2] if cfg else 50} من 50\nهدف الربح للبيع: {target}"
     if view == "dashboard":
         row = db.execute("SELECT * FROM campaigns WHERE bot=? ORDER BY id DESC LIMIT 1", (key,)).fetchone()
         text = dashboard.summary(db, row, live.STAGES)
@@ -105,6 +108,13 @@ def home(db,key,view="home"):
 def save(db,key,view,value):
     if live.active(db,key):
         raise ValueError("في صفقة حقيقية قيد التنفيذ.")
+    if view == "count":
+        value = value.strip()
+        if not value.isdecimal() or len(value) > 2 or not 1 <= int(value) <= 50:
+            raise ValueError("أدخل عدد صحيح من 1 إلى 50.")
+        db.execute("UPDATE live_settings SET wallet_count=? WHERE bot=?", (int(value),key))
+        home(db,key)
+        return f"انحفظ العدد: {int(value)} محفظة."
     value = value.strip().replace("٫",".").replace(",",".").rstrip("٪%")
     if view == "budget":
         number = live.budget_percent(value)
@@ -179,11 +189,15 @@ def handle(db,key,action,callback):
         if not db.execute("SELECT 1 FROM live_settings WHERE bot=?", (key,)).fetchone():
             return "افتح «المحفظة» أول مرة."
         home(db,key,action)
+        if action == "count":
+            return "اختار العدد أو ابعته برسالة من 1 إلى 50."
         return "اختار الأرقام واضغط حفظ."
     if view in FIELDS:
         if callback:
             op = action.split(":",1)[1]
             draft = current["draft"]
+            if view == "count" and op.startswith("pick"):
+                return save(db,key,view,op[4:])
             if op.startswith("pct"):
                 return save(db,key,view,op[3:])
             if op=="save":

@@ -10,13 +10,13 @@ def summary(db, row, stages):
     if row is None:
         return "لوحة الصفقة · ما في صفقة حقيقية مسجّلة بعد."
     stage = row["stage"]
-    lines = ["لوحة الصفقة · " + stages[stage], row["mint"],
+    lines = ["لوحة الصفقة · " + stages[stage], row["mint"], f"عدد المحافظ المختار: {row['wallet_count']}",
              f"سقف العملية: {row['budget']/1e9:g} SOL  |  هدف البيع: +{row['target']/100:g}%"]
     legs = db.execute("""SELECT COUNT(*), COALESCE(SUM(units),0), COUNT(NULLIF(units,0))
                          FROM child_trades WHERE campaign=?""", (row["id"],)).fetchone()
     if not legs[0]:
         if stage != "plan50":
-            lines.append(f"تقدّم المرحلة: {row['cursor']}/50")
+            lines.append(f"تقدّم المرحلة: {row['cursor']}/{row['wallet_count']}")
         return "\n".join(lines + [row["error"] or "بانتظار بيانات الصفقة."])
     count, units, holders = legs
     lines.append(f"محافظ معها العملة: {holders}/{count}")

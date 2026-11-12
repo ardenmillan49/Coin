@@ -51,10 +51,11 @@ def start(db,row,chain,master,children,mint,notify):
     cap = row["budget"]
     if row["budget_bps"]:
         cap = min(cap, percentage_cap(balance, row["budget_bps"]))
-    allocation = (cap - MASTER_RESERVE) // COUNT
+    count = row["wallet_count"]
+    allocation = (cap - MASTER_RESERVE) // count
     order = allocation - overhead()
     if order <= 0:
-        raise ValueError("الميزانية ما بتغطي احتياطي الحسابات الخمسين.")
+        raise ValueError("الميزانية ما بتغطي احتياطي المحافظ المختارة.")
     if balance < cap:
         raise ValueError("رصيد الرئيسية أقل من الميزانية.")
     if len(children) != COUNT or len({str(k.pubkey()) for k in children}) != COUNT:
@@ -67,7 +68,7 @@ def start(db,row,chain,master,children,mint,notify):
         db.execute("INSERT INTO child_plans(campaign,allocation,order_size) VALUES(?,?,?)",
                    (row["id"],allocation,order))
         db.executemany("INSERT INTO child_trades(campaign,idx,owner) VALUES(?,?,?)",
-                       [(row["id"],i,str(k.pubkey())) for i,k in enumerate(children)])
+                       [(row["id"],i,str(k.pubkey())) for i,k in enumerate(children[:count])])
         notify(db,row,f"حصة كل محفظة {allocation/1e9:g} SOL، مبلغ شرائها {order/1e9:g} SOL. "
                       f"أكبر حساب خارج المنحنى {report['largest_external_account_pct']:.2f}%.")
 
@@ -101,11 +102,11 @@ def settle(db,row,tx,notify,sell_slippage):
                 db.execute("UPDATE child_trades SET units=units+? WHERE campaign=? AND idx=?",
                            (change,row["id"],idx))
         cursor = plan["next_cursor"]
-        if cursor==COUNT:
+        if cursor==row["wallet_count"]:
             stage = {"fund50":"buy50","buy50":"hold50","sell50":"done"}[stage]
             cursor = 0
-            notify(db,row,{"buy50":"تأكّد تمويل المحافظ الخمسين. بلّش الشراء من عناوينها.",
-                           "hold50":"تأكدت مشتريات المحافظ الخمسين. بلّشت مراقبة هدف الربح.",
+            notify(db,row,{"buy50":"تأكّد تمويل المحافظ المختارة. بلّش الشراء من عناوينها.",
+                           "hold50":"تأكدت مشتريات المحافظ المختارة. بلّشت مراقبة هدف الربح.",
                            "done":"تأكد البيع. الـSOL بالمحافظ الفرعية، واختيار «تجميع SOL» بيرجعه للرئيسية."}[stage])
     db.execute("INSERT INTO live_receipts VALUES(?,?,?,?,?,?,?)",
                (row["pending"],row["id"],row["stage"],row["cursor"],cost,meta["fee"],not meta["err"]))
@@ -154,9 +155,11 @@ def step(db,row,chain,master,children,mint,notify):
     if stage=="plan50":
         start(db,row,chain,master,children,mint,notify)
         return
+    count = row["wallet_count"]
+    children = children[:count]
     plan = db.execute("SELECT * FROM child_plans WHERE campaign=?",(row["id"],)).fetchone()
     legs = db.execute("SELECT * FROM child_trades WHERE campaign=? ORDER BY idx",(row["id"],)).fetchall()
-    if any(str(key.pubkey())!=leg["owner"] for key,leg in zip(children,legs)) or len(legs)!=COUNT:
+    if any(str(key.pubkey())!=leg["owner"] for key,leg in zip(children,legs)) or len(legs)!=count or len(children)!=count:
         raise ValueError("عناوين المحافظ لا تطابق سجل الصفقة")
     total = sum(r["units"] for r in legs)
     if row["manual"] and stage in ("fund50","buy50","hold50"):
@@ -169,17 +172,17 @@ def step(db,row,chain,master,children,mint,notify):
     i = row["cursor"]
     payer = master.pubkey()
     if stage=="fund50":
-        end = min(COUNT,i+FUND_BATCH)
+        end = min(count,i+FUND_BATCH)
         ix = [transfer(TransferParams(from_pubkey=payer,to_pubkey=c.pubkey(),lamports=plan["allocation"]))
               for c in children[i:end]]
         issue(db,row,chain,ix,[master],end,[str(payer),*[l["owner"] for l in legs[i:end]]])
         return
-    if stage=="sell50" and i<COUNT and not legs[i]["units"]:
-        next_i = next((j for j in range(i,COUNT) if legs[j]["units"]),COUNT)
+    if stage=="sell50" and i<count and not legs[i]["units"]:
+        next_i = next((j for j in range(i,count) if legs[j]["units"]),count)
         with db:
             db.execute("UPDATE campaigns SET cursor=?,stage=? WHERE id=?",
-                       (next_i,"done" if next_i==COUNT else stage,row["id"]))
-            if next_i==COUNT:
+                       (next_i,"done" if next_i==count else stage,row["id"]))
+            if next_i==count:
                 notify(db,row,"انتهى بيع الكميات المشتراة. التجميع اليدوي متاح.")
         return
     venue = chain.market(mint)
@@ -194,7 +197,7 @@ def step(db,row,chain,master,children,mint,notify):
                        (row["id"], str(token), str(sol), now))
     if stage=="hold50":
         basis = row["spent"]
-        if sale_estimate(token, sol, total) >= (basis*(10000+row["target"])+9999)//10000 + COUNT*10000:
+        if sale_estimate(token, sol, total) >= (basis*(10000+row["target"])+9999)//10000 + count*10000:
             with db:
                 db.execute("UPDATE child_plans SET exit_basis=?,exit_units=? WHERE campaign=?",(basis,total,row["id"]))
                 db.execute("UPDATE campaigns SET stage='sell50',cursor=0 WHERE id=?",(row["id"],))
@@ -203,7 +206,7 @@ def step(db,row,chain,master,children,mint,notify):
     if stage=="buy50" and venue[0]!="curve":
         raise ValueError("هاجرت العملة أثناء الشراء. فيك تبيع الكمية المفتوحة بزر البيع اليدوي.")
     # Two independent trader signatures per curve transaction; pool exits need more accounts.
-    end = min(COUNT,i+(TRADE_BATCH if venue[0]=="curve" else 1))
+    end = min(count,i+(TRADE_BATCH if venue[0]=="curve" else 1))
     if stage=="sell50" and end>i+1 and not legs[i+1]["units"]:
         end = i+1
     from solders.compute_budget import set_compute_unit_limit

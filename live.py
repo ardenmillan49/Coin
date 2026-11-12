@@ -37,7 +37,10 @@ def init(db):
     """)
 
     for table in ("live_settings", "campaigns"):
-        if "budget_bps" not in {r[1] for r in db.execute(f"PRAGMA table_info({table})")}:
+        columns = {r[1] for r in db.execute(f"PRAGMA table_info({table})")}
+        if "wallet_count" not in columns:
+            db.execute(f"ALTER TABLE {table} ADD COLUMN wallet_count INTEGER NOT NULL DEFAULT 50 CHECK(wallet_count BETWEEN 1 AND 50)")
+        if "budget_bps" not in columns:
             db.execute(f"ALTER TABLE {table} ADD COLUMN budget_bps INTEGER CHECK(budget_bps BETWEEN 1 AND 10000)")
             if table == "live_settings":
                 db.execute("UPDATE live_settings SET prompt=NULL WHERE prompt IN ('mint','plan')")
@@ -87,7 +90,7 @@ def active(db, key):
 def status(row):
     return (f"{STAGES[row['stage']]} | {row['mint']}\n"
             f"الميزانية {row['budget']/1e9:g} SOL، الهدف +{row['target']/100:g}%\n"
-            f"آخر دفعة: {row['cursor']}/50\nصافي المدفوع حتى الآن: {row['spent']/1e9:g} SOL"
+            f"آخر دفعة: {row['cursor']}/{row['wallet_count']}\nصافي المدفوع حتى الآن: {row['spent']/1e9:g} SOL"
             + (f"\n{row['error']}" if row["error"] else "")
             + (f"\nآخر معاملة: {row['last_sig']}" if row["last_sig"] else ""))
 
@@ -136,7 +139,7 @@ def command(db, key, text):
             bot.largest_accounts("4a9ZHEceRAfHAribgXDsdYxfR1hqf6MrRQja9caQpump",chain.FINAL)
         except OSError:
             return "تعذّر فحص الحيازات عبر المسارات المتاحة. اضبط SOLANA_HOLDERS_RPC_URL بمزوّد يدعم getTokenLargestAccounts في /etc/coin-bot.env ثم أعد تشغيل الخدمة."
-        reserve = N * wallet_trades.overhead() + wallet_trades.MASTER_RESERVE
+        reserve = cfg["wallet_count"] * wallet_trades.overhead() + wallet_trades.MASTER_RESERVE
         check = "فحص التوقيع متاح بعد التمويل."
         if balance >= 5000:
             from solders.compute_budget import set_compute_unit_limit
@@ -145,8 +148,8 @@ def command(db, key, text):
             if sim["err"]:
                 raise ValueError(f"فشل اختبار التوقيع: {sim['err']}")
             check = "نجحت محاكاة معاملة موقعة بدون بث."
-        funded = bool(cfg["budget_bps"] and reserve < wallet_trades.percentage_cap(balance, cfg["budget_bps"]))
-        return (f"اتصال Solana شغّال. تم التحقق من مفاتيح 50 محفظة. الرصيد {balance/1e9:g} SOL."
+        funded = bool(cfg["budget_bps"] and reserve + cfg["wallet_count"] <= wallet_trades.percentage_cap(balance, cfg["budget_bps"]))
+        return (f"اتصال Solana شغّال. تم التحقق من مفاتيح 50 محفظة. المختار للشراء: {cfg['wallet_count']}. الرصيد {balance/1e9:g} SOL."
                 f" احتياطي الحسابات والرسوم المقدر {reserve/1e9:g} SOL. {check}"
                 + (" الميزانية مغطّاة." if funded else " اضبط الميزانية والتمويل قبل الشراء."))
     if action == "/live":
@@ -178,7 +181,7 @@ def command(db, key, text):
         if not cfg["budget_bps"] or not cfg["target"]:
             return "اضبط حقلي «الميزانية» و«هدف الربح» أولاً."
         db.execute("UPDATE live_settings SET prompt='mint' WHERE bot=?", (key,))
-        return f"ابعت عقد Pump.fun لتفعيل الشراء الحقيقي بحد {cfg['budget_bps']/100:g}% من رصيد الرئيسية وهدف +{cfg['target']/100:g}%."
+        return f"ابعت عقد Pump.fun لتفعيل الشراء من {cfg['wallet_count']} محفظة بحد {cfg['budget_bps']/100:g}% من رصيد الرئيسية وهدف +{cfg['target']/100:g}%."
     if not cfg or not cfg["prompt"]:
         return None
     if text.startswith("/") or text in ("مراقبة عملة","فحص عملة","حالة الصفقة","بيع تجريبي","إلغاء المراقبة"):
@@ -193,7 +196,7 @@ def command(db, key, text):
         if not pct.is_finite() or not 1 <= pct <= 1000000 or pct != int(pct):
             raise ValueError("نسبة الهدف بين 0.01% و10000%")
         db.execute("UPDATE live_settings SET budget=NULL,budget_bps=?,target=?,prompt=NULL WHERE bot=?", (budget,int(pct),key))
-        return "انحفظت الخطة لـ 50 محفظة. وقت الإطلاق اضغط «شراء حقيقي» وابعت العقد."
+        return f"انحفظت الخطة لـ {cfg['wallet_count']} محفظة. وقت الإطلاق اضغط «شراء حقيقي» وابعت العقد."
     import solana_live as chain
     mint = str(chain.pk(text.strip()))
     if row:
@@ -204,13 +207,14 @@ def command(db, key, text):
         return "حدّد نسبة الميزانية قبل الشراء."
     balance = bot.rpc("getBalance", [cfg["wallet"], chain.FINAL])["value"]
     cap = wallet_trades.percentage_cap(balance, cfg["budget_bps"])
-    if cap <= wallet_trades.MASTER_RESERVE + N * wallet_trades.overhead():
-        return "النسبة المحددة ما بتغطي احتياطي المحافظ الخمسين. ما تم تفعيل الشراء."
-    db.execute("""INSERT INTO campaigns(bot,wallet,mint,budget,target,budget_bps,stage)
-                  VALUES(?,?,?,?,?,?,'plan50')""",
-               (key,cfg["wallet"],mint,cap,cfg["target"],cfg["budget_bps"]))
+    count = cfg["wallet_count"]
+    if cap < wallet_trades.MASTER_RESERVE + count * (wallet_trades.overhead() + 1):
+        return "النسبة المحددة ما بتغطي احتياطي المحافظ المختارة. ما تم تفعيل الشراء."
+    db.execute("""INSERT INTO campaigns(bot,wallet,mint,budget,target,budget_bps,wallet_count,stage)
+                  VALUES(?,?,?,?,?,?,?,'plan50')""",
+               (key,cfg["wallet"],mint,cap,cfg["target"],cfg["budget_bps"],count))
     db.execute("UPDATE live_settings SET prompt=NULL WHERE bot=?", (key,))
-    return "تفعّل تمويل 50 محفظة بـ SOL والشراء من عناوينها. عند البيع بتبقى الحصيلة بالفرعيات حتى تطلب التجميع."
+    return f"تفعّل تمويل {count} محفظة بـ SOL والشراء من عناوينها. عند البيع بتبقى الحصيلة بالفرعيات حتى تطلب التجميع."
 
 
 def notify(db, row, message):
