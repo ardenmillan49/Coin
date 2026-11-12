@@ -36,7 +36,7 @@ class TelegramTests(unittest.TestCase):
             self.assertNotIn("secret", hint)
             self.assertIsNone(db.execute("SELECT owner FROM telegram").fetchone()[0])
             send(2, "/start secret", 2, "group")
-            send(3, "/start secret")
+            send(3, "/start\nsecret")
             send(4, "مراقبة عملة", 2)
             self.assertEqual(db.execute("SELECT owner,stage FROM telegram").fetchone()[:], (1, None))
             with patch.object(tg, "parse_mint", return_value="mint"):
@@ -59,3 +59,17 @@ class TelegramTests(unittest.TestCase):
                 send(9, "بيع تجريبي")
                 self.assertEqual(db.execute("SELECT COUNT(*) FROM replies").fetchone()[0], before)
             db.close()
+
+    def test_terminal_pair_requires_request_and_cannot_replace_owner(self):
+        db = bot.open_db(":memory:")
+        tg.init_chat(db)
+        with db:
+            db.execute("INSERT INTO telegram(id) VALUES(123)")
+        self.assertFalse(tg.pair_from_terminal(db, 123, "42"))
+        tg.receive(db, 123, "secret", {"update_id": 8, "message": {"text": "/start",
+                   "chat": {"id": 42, "type": "private"}, "from": {"id": 42}}})
+        self.assertIn("42", db.execute("SELECT text FROM replies").fetchone()[0])
+        self.assertTrue(tg.pair_from_terminal(db, 123, "42"))
+        self.assertFalse(tg.pair_from_terminal(db, 123, "42"))
+        self.assertEqual(db.execute("SELECT owner FROM telegram").fetchone()[0], 42)
+        db.close()

@@ -5,6 +5,8 @@ import os
 from pathlib import Path
 import re
 import secrets
+import select
+import sys
 import sqlite3
 import tempfile
 import time
@@ -71,6 +73,8 @@ def init_chat(db):
         CREATE TABLE IF NOT EXISTS telegram (
           id INTEGER PRIMARY KEY, owner INTEGER, offset INTEGER DEFAULT 0,
           stage TEXT, draft TEXT, mint TEXT, budget INTEGER);
+        CREATE TABLE IF NOT EXISTS pairing_requests (
+          bot_id INTEGER, chat INTEGER, PRIMARY KEY(bot_id, chat));
         CREATE TABLE IF NOT EXISTS replies (
           id INTEGER PRIMARY KEY, bot_id INTEGER, chat INTEGER, text TEXT);
     """)
@@ -184,11 +188,13 @@ def receive(db, key, secret, update):
         if not text or chat.get("type") != "private" or sender != chat.get("id"):
             return
         if row["owner"] is None:
-            if text == "/start " + secret:
+            if text.split() == ["/start", secret]:
                 db.execute("UPDATE telegram SET owner=? WHERE id=?", (sender, key))
                 answer = "تم ربط حسابك. " + HELP
             else:
-                answer = "البوت بانتظار الربط. افتح آخر رابط t.me كامل ظهر بطرفية السيرفر واضغط Start بتيليغرام."
+                db.execute("INSERT OR IGNORE INTO pairing_requests VALUES(?,?)", (key, sender))
+                answer = (f"رقم حسابك: {sender}\nاكتب هالرقم بطرفية السيرفر واضغط Enter لربط حسابك. "
+                          "فيك كمان تستخدم رابط الربط الخاص.")
         elif row["owner"] == sender:
             try:
                 answer = command(db, row, text)
@@ -240,6 +246,21 @@ def run():
         run_polling(config)
 
 
+def pair_from_terminal(db, key, value):
+    value = value.strip()
+    if not re.fullmatch(r"[1-9][0-9]{0,16}", value):
+        return False
+    sender = int(value)
+    with db:
+        updated = db.execute("""UPDATE telegram SET owner=? WHERE id=? AND owner IS NULL
+            AND EXISTS (SELECT 1 FROM pairing_requests WHERE bot_id=? AND chat=?)""",
+                             (sender, key, key, sender))
+        if updated.rowcount:
+            tell(db, key, sender, "تم ربط حسابك. " + HELP)
+            return True
+    return False
+
+
 def run_polling(config):
     key, token = config["id"], config["token"]
     db = bot.open_db(Path(__file__).resolve().with_name("paper.sqlite"))
@@ -249,24 +270,32 @@ def run_polling(config):
     owner = db.execute("SELECT owner FROM telegram WHERE id=?", (key,)).fetchone()[0]
     secret = secrets.token_urlsafe(24)
     if owner is None:
-        print(f"افتح رابط الربط الخاص واضغط Start:\nhttps://t.me/{config['username']}?start={secret}", flush=True)
+        print(f"Send /start in Telegram, type your numeric ID here and press Enter.\nأو افتح رابط الربط الخاص واضغط Start:\nhttps://t.me/{config['username']}?start={secret}", flush=True)
     else:
         print(f"Coin شغّال على @{config['username']}", flush=True)
     while True:
         try:
             tick(db, key)
             owner = db.execute("SELECT owner FROM telegram WHERE id=?", (key,)).fetchone()[0]
+            if owner is None and sys.stdin.isatty() and select.select([sys.stdin], [], [], 0)[0]:
+                if pair_from_terminal(db, key, sys.stdin.readline()):
+                    print("Telegram account paired.", flush=True)
+                    continue
+                print("Send /start and enter the numeric ID from the reply.", flush=True)
             for reply in db.execute("SELECT * FROM replies WHERE bot_id=? ORDER BY id", (key,)).fetchall():
                 try:
-                    api(token, "sendMessage", chat_id=reply["chat"], text=reply["text"],
-                        reply_markup={"keyboard": MENU, "resize_keyboard": True} if reply["chat"] == owner else {})
+                    params = {"chat_id": reply["chat"], "text": reply["text"]}
+                    if reply["chat"] == owner:
+                        params["reply_markup"] = {"keyboard": MENU, "resize_keyboard": True}
+                    api(token, "sendMessage", **params)
                 except TelegramError as exc:
-                    if exc.code != 403:
+                    if exc.code not in (400, 403):
                         raise
+                    print(f"Telegram skipped undeliverable reply ({exc.code}).", flush=True)
                 with db:
                     db.execute("DELETE FROM replies WHERE id=?", (reply["id"],))
             row = db.execute("SELECT offset,mint FROM telegram WHERE id=?", (key,)).fetchone()
-            for update in api(token, "getUpdates", offset=row["offset"], timeout=2 if row["mint"] else 20,
+            for update in api(token, "getUpdates", offset=row["offset"], timeout=2 if row["mint"] or owner is None else 20,
                               allowed_updates=["message"]):
                 receive(db, key, secret, update)
         except TelegramError as exc:
