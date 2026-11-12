@@ -18,6 +18,7 @@ from decimal import Decimal, InvalidOperation
 
 import bot
 import live
+import panel
 
 MENU = [["مراقبة عملة", "فحص عملة"], ["حالة الصفقة", "بيع تجريبي"], ["إلغاء المراقبة"]]
 ACTIONS = dict(zip(sum(MENU, []), ["/watch", "/inspect", "/status", "/sell", "/cancel"]))
@@ -26,8 +27,9 @@ HELP = "Coin للتداول الحقيقي والمحاكاة. اختار من �
 
 
 class TelegramError(Exception):
-    def __init__(self, code, retry=5):
+    def __init__(self, code, retry=5, description=""):
         super().__init__(f"Telegram API ({code})")
+        self.description = description.lower()
         self.code = code
         self.retry = retry
 
@@ -47,7 +49,7 @@ def api(token, method, **params):
     except (OSError, ValueError):
         raise TelegramError(0) from None
     if not payload.get("ok"):
-        raise TelegramError(payload.get("error_code", 0), payload.get("parameters", {}).get("retry_after", 5))
+        raise TelegramError(payload.get("error_code", 0), payload.get("parameters", {}).get("retry_after", 5), payload.get("description",""))
     return payload["result"]
 
 
@@ -74,6 +76,7 @@ def setup(path):
 
 def init_chat(db):
     live.init(db)
+    panel.init(db)
     db.executescript("""
         CREATE TABLE IF NOT EXISTS telegram (
           id INTEGER PRIMARY KEY, owner INTEGER, offset INTEGER DEFAULT 0,
@@ -190,11 +193,14 @@ def receive(db, key, secret, update):
         if row["offset"] > update["update_id"]:
             return
         db.execute("UPDATE telegram SET offset=? WHERE id=?", (update["update_id"] + 1, key))
-        msg = update.get("message", {})
+        callback = update.get("callback_query")
+        msg = callback.get("message", {}) if callback else update.get("message", {})
         chat = msg.get("chat", {})
-        sender = msg.get("from", {}).get("id")
-        text = msg.get("text", "").strip()
+        sender = (callback or msg).get("from", {}).get("id")
+        text = callback.get("data","") if callback else msg.get("text", "").strip()
         if not text or chat.get("type") != "private" or sender != chat.get("id"):
+            return
+        if callback and (sender != row["owner"] or msg.get("message_id") != panel.state(db,key)["message"]):
             return
         if row["owner"] is None:
             if text.split() == ["/start", secret]:
@@ -206,13 +212,19 @@ def receive(db, key, secret, update):
                           "فيك كمان تستخدم رابط الربط الخاص.")
         elif row["owner"] == sender:
             try:
-                answer = command(db, row, text)
-            except (ValueError, InvalidOperation) as exc:
+                answer = panel.handle(db,key,text,bool(callback))
+                if answer is None:
+                    answer = command(db,row,text)
+            except InvalidOperation:
+                answer = "أدخل قيمة رقمية صحيحة."
+            except ValueError as exc:
                 answer = f"تعذّر التنفيذ: {exc}"
             except OSError:
                 answer = "الاتصال بشبكة Solana تعذّر. جرّب الأمر مرة تانية."
         else:
             return
+        if not callback and msg.get("message_id") and (row["owner"] == sender or text.split() == ["/start", secret]):
+            db.execute("INSERT OR IGNORE INTO input_cleanup VALUES(?,?,?)",(key,sender,msg["message_id"]))
         tell(db, key, sender, answer)
 
 
@@ -308,6 +320,31 @@ def run_polling(config):
         db.close()
 
 
+def show_panel(db, key, token, reply):
+    with db:
+        current = panel.state(db,key)
+        params = panel.render(db,key,reply["text"])
+    chat = reply["chat"]
+    if not current["migrated"]:
+        temp = api(token,"sendMessage",chat_id=chat,text="عم افتح لوحة Coin…",reply_markup={"remove_keyboard":True})
+        with db:
+            db.execute("UPDATE panels SET migrated=1 WHERE bot=?", (key,))
+            db.execute("INSERT OR IGNORE INTO input_cleanup VALUES(?,?,?)",(key,chat,temp["message_id"]))
+    if current["message"]:
+        try:
+            api(token,"editMessageText",chat_id=chat,message_id=current["message"],**params)
+            return
+        except TelegramError as exc:
+            if exc.code==400 and "message is not modified" in exc.description:
+                return
+            if exc.code!=400 or not any(reason in exc.description for reason in
+                                        ("message to edit not found","message can't be edited")):
+                raise
+    sent = api(token,"sendMessage",chat_id=chat,**params)
+    with db:
+        db.execute("UPDATE panels SET message=? WHERE bot=?", (sent["message_id"],key))
+
+
 def poll(db, key, token, secret):
     while True:
         try:
@@ -320,19 +357,34 @@ def poll(db, key, token, secret):
                 print("Send /start and enter the numeric ID from the reply.", flush=True)
             for reply in db.execute("SELECT * FROM replies WHERE bot_id=? ORDER BY id", (key,)).fetchall():
                 try:
-                    params = {"chat_id": reply["chat"], "text": reply["text"]}
                     if reply["chat"] == owner:
-                        params["reply_markup"] = {"keyboard": MENU, "resize_keyboard": True}
-                    api(token, "sendMessage", **params)
+                        show_panel(db,key,token,reply)
+                    else:
+                        api(token,"sendMessage",chat_id=reply["chat"],text=reply["text"])
                 except TelegramError as exc:
                     if exc.code not in (400, 403):
                         raise
                     print(f"Telegram skipped undeliverable reply ({exc.code}).", flush=True)
                 with db:
                     db.execute("DELETE FROM replies WHERE id=?", (reply["id"],))
+            for item in db.execute("SELECT * FROM input_cleanup WHERE bot=?", (key,)).fetchall():
+                try:
+                    api(token,"deleteMessage",chat_id=item["chat"],message_id=item["message"])
+                except TelegramError as exc:
+                    if exc.code not in (400,403):
+                        raise
+                with db:
+                    db.execute("DELETE FROM input_cleanup WHERE bot=? AND chat=? AND message=?",
+                               (key,item["chat"],item["message"]))
             row = db.execute("SELECT offset,mint FROM telegram WHERE id=?", (key,)).fetchone()
             for update in api(token, "getUpdates", offset=row["offset"], timeout=2 if row["mint"] or owner is None or live.active(db, key) else 20,
-                              allowed_updates=["message"]):
+                              allowed_updates=["message","callback_query"]):
+                if "callback_query" in update:
+                    try:
+                        api(token,"answerCallbackQuery",callback_query_id=update["callback_query"]["id"])
+                    except TelegramError as exc:
+                        if exc.code != 400:
+                            raise
                 receive(db, key, secret, update)
         except TelegramError as exc:
             if exc.code in (401, 404, 409):

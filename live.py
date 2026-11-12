@@ -126,8 +126,8 @@ def command(db, key, text):
         if action == "/plan":
             db.execute("UPDATE live_settings SET prompt='plan' WHERE bot=?", (key,))
             return "ابعت ميزانيتك الإجمالية بـ SOL ونسبة الربح برسالة واحدة. مثال: 0.5 100"
-        if not cfg["budget"]:
-            return "اضبط الميزانية والهدف من «إعداد شراء حقيقي» أولاً."
+        if not cfg["budget"] or not cfg["target"]:
+            return "اضبط حقلي «الميزانية» و«هدف الربح» أولاً."
         db.execute("UPDATE live_settings SET prompt='mint' WHERE bot=?", (key,))
         return f"ابعت عقد Pump.fun لتفعيل الشراء الحقيقي بحد {cfg['budget']/1e9:g} SOL وهدف +{cfg['target']/100:g}%."
     if not cfg or not cfg["prompt"]:

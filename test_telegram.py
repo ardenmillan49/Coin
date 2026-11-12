@@ -73,3 +73,33 @@ class TelegramTests(unittest.TestCase):
         self.assertFalse(tg.pair_from_terminal(db, 123, "42"))
         self.assertEqual(db.execute("SELECT owner FROM telegram").fetchone()[0], 42)
         db.close()
+
+    def test_inline_fields_and_message_reuse(self):
+        db = bot.open_db(":memory:")
+        tg.init_chat(db)
+        with db:
+            db.execute("INSERT INTO telegram(id,owner) VALUES(123,5)")
+            db.execute("INSERT INTO live_settings(bot,wallet) VALUES(123,'wallet')")
+            db.execute("INSERT INTO panels(bot,message,migrated) VALUES(123,75,1)")
+        def press(number, data, sender=5, message=75):
+            tg.receive(db,123,"secret",{"update_id":number,"callback_query":{"from":{"id":sender},"data":data,
+                       "message":{"message_id":message,"chat":{"id":5,"type":"private"}}}})
+        for i, op in enumerate(("budget","budget:0","budget:.","budget:5","budget:save",
+                                "target","target:1","target:0","target:0","target:save"),1):
+            press(i,op)
+        self.assertEqual(tuple(db.execute("SELECT budget,target FROM live_settings").fetchone()),(500000000,10000))
+        self.assertIsNone(tg.live.active(db,123))
+        press(11,"/buy",sender=4)
+        press(12,"/buy",message=74)
+        self.assertIsNone(db.execute("SELECT prompt FROM live_settings").fetchone()[0])
+        press(13,"/buy")
+        self.assertEqual(db.execute("SELECT prompt FROM live_settings").fetchone()[0],"mint")
+        with patch.object(tg,"api",return_value=True) as api:
+            tg.show_panel(db,123,"token",{"chat":5,"text":"حدث"})
+            self.assertEqual(api.call_args.args,("token","editMessageText"))
+            self.assertEqual(api.call_args.kwargs["message_id"],75)
+        tg.receive(db,123,"secret",{"update_id":14,"message":{"from":{"id":5},"message_id":76,
+                   "text":"/start","chat":{"id":5,"type":"private"}}})
+        self.assertEqual(db.execute("SELECT message FROM input_cleanup").fetchone()[0],76)
+        self.assertIsNone(db.execute("SELECT prompt FROM live_settings").fetchone()[0])
+        db.close()
