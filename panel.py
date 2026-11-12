@@ -2,6 +2,7 @@
 from decimal import Decimal
 import bot
 import live
+import sweep
 import withdrawals
 
 HOME = [
@@ -9,7 +10,7 @@ HOME = [
     [("المحفظة", "/wallet"), ("فحص الجاهزية", "/ready")],
     [("شراء حقيقي", "/buy"), ("حالة التداول", "/live")],
     [("بيع حقيقي الآن", "/exit"), ("إلغاء طلب الشراء", "/unarm")],
-    [("فحص المحافظ الـ50", "/checkwallets")],
+    [("فحص المحافظ الـ50", "/checkwallets"), ("تجميع SOL", "sweep")],
     [("سحب SOL", "withdraw"), ("المحاكاة", "paper")],
 ]
 PAPER = [
@@ -36,6 +37,8 @@ def state(db, key):
 
 
 def buttons(view, draft=""):
+    if view=="sweep_review":
+        return [[("تأكيد التجميع","collect:"+draft),("إلغاء","home")]]
     if view.startswith("withdraw_"):
         rows = []
         if view == "withdraw_amount":
@@ -64,6 +67,10 @@ def render(db, key, note):
         text += "\n\nابعت عنوان محفظتك الرئيسية على شبكة Solana."
     if view == "withdraw_amount":
         text += "\n\nالوجهة:\n" + current["draft"] + "\nابعت مبلغ السحب بـ SOL أو اختار كامل الرصيد."
+    if view == "sweep_review":
+        quote = db.execute("SELECT * FROM sweeps WHERE bot=? AND id=?", (key,current["draft"])).fetchone()
+        if quote:
+            text += "\n\n" + sweep.summary(quote)
     if view == "withdraw_review":
         quote = db.execute("SELECT * FROM withdrawals WHERE id=? AND bot=?", (current["draft"],key)).fetchone()
         if quote:
@@ -81,6 +88,7 @@ def reset_input(db,key):
 
 def home(db,key,view="home"):
     state(db,key)
+    db.execute("DELETE FROM sweeps WHERE bot=? AND state='review'", (key,))
     db.execute("DELETE FROM withdrawals WHERE bot=? AND state='review'", (key,))
     db.execute("UPDATE panels SET view=?,draft='' WHERE bot=?", (view,key))
     reset_input(db,key)
@@ -110,7 +118,23 @@ def handle(db,key,action,callback):
     if action in ("/start","/help") or (callback and action in ("home","paper")):
         home(db,key,"paper" if action=="paper" else "home")
         return ""
+    if callback and action == "sweep":
+        if sweep.running(db) or live.active(db,key) or withdrawals.pending(db):
+            return "في عملية قيد التنفيذ. التجميع اليدوي متاح بعد انتهائها."
+        home(db,key)
+        ident,note = sweep.preview(db,key)
+        if ident:
+            db.execute("UPDATE panels SET view='sweep_review',draft=? WHERE bot=?", (ident,key))
+        return note
+    if view=="sweep_review":
+        if callback and action=="collect:"+current["draft"]:
+            result = sweep.confirm(db,key,current["draft"])
+            home(db,key)
+            return result
+        return "راجع وجهة التجميع واختار تأكيد أو إلغاء."
     if callback and action == "withdraw":
+        if sweep.running(db):
+            return "تجميع SOL قيد التنفيذ."
         pending = withdrawals.pending(db)
         if pending:
             return "في سحب بانتظار التأكيد. التوقيع:\n" + pending["signature"]

@@ -19,6 +19,7 @@ from decimal import Decimal, InvalidOperation
 import bot
 import live
 import panel
+import sweep
 import withdrawals
 
 MENU = [["مراقبة عملة", "فحص عملة"], ["حالة الصفقة", "بيع تجريبي"], ["إلغاء المراقبة"]]
@@ -290,6 +291,7 @@ def live_worker(path, key, stop):
             try:
                 live.tick(connection, key)
                 withdrawals.tick(connection,key)
+                sweep.tick(connection,key)
             except Exception:
                 logging.exception("Live worker tick failed")
             stop.wait(1)
@@ -379,7 +381,7 @@ def poll(db, key, token, secret):
                     db.execute("DELETE FROM input_cleanup WHERE bot=? AND chat=? AND message=?",
                                (key,item["chat"],item["message"]))
             row = db.execute("SELECT offset,mint FROM telegram WHERE id=?", (key,)).fetchone()
-            for update in api(token, "getUpdates", offset=row["offset"], timeout=2 if row["mint"] or owner is None or live.active(db, key) or withdrawals.pending(db) else 20,
+            for update in api(token, "getUpdates", offset=row["offset"], timeout=2 if row["mint"] or owner is None or live.active(db, key) or withdrawals.pending(db) or sweep.running(db) else 20,
                               allowed_updates=["message","callback_query"]):
                 if "callback_query" in update:
                     try:
