@@ -83,6 +83,34 @@ def close_ata(owner, receiver, mint, program):
     return instruction(program, b"\x09", [ata(owner, mint, program), receiver, owner], {0, 1}, {2})
 
 
+def collect_tokens(child, master, mint, program, units, decimals, close_empty):
+    ix = [transfer(child, master, mint, program, units, decimals)]
+    if close_empty:
+        ix.append(close_ata(child, master, mint, program))
+    return ix
+
+
+def check_child_signers(expected_wallet, batch_size):
+    master, children = keys()
+    payer = master.pubkey()
+    addresses = {child.pubkey() for child in children}
+    if str(payer) != expected_wallet or len(children) != COUNT or len(addresses) != COUNT or payer in addresses:
+        raise ValueError("مفاتيح المحافظ ما بتطابق إعدادات البوت.")
+    # Local-only challenge: random test mint and hash, no blockhash lookup or broadcast.
+    mint = Pubkey.from_bytes(os.urandom(32))
+    challenge = Hash.from_bytes(os.urandom(32))
+    for start in range(0, COUNT, batch_size):
+        batch = children[start:start + batch_size]
+        for program in (SPL, TOKEN22):
+            ix = []
+            for child in batch:
+                ix.extend(collect_tokens(child.pubkey(), payer, mint, program, 1, 6, True))
+            tx = Transaction.new_signed_with_payer(ix, payer, [master, *batch], challenge)
+            if len(bytes(tx)) > 1232 or not all(tx.verify_with_results()):
+                raise ValueError(f"فشل فحص التوقيع بالدفعة اللي بتبدأ بالمحفظة {start+1}.")
+    return len(addresses)
+
+
 def data_account(address, program):
     result = bot.rpc("getAccountInfo", [str(address), dict(FINAL, encoding="base64")])["value"]
     if result is None:

@@ -69,6 +69,14 @@ def command(db, key, text):
             return f"عنوان محفظة البوت على Solana:\n{wallet}\nتعذّر جلب الرصيد من RPC."
 
         return f"عنوان محفظة التداول على Solana:\n{wallet}\nالرصيد {balance/1e9:g} SOL"
+    if action == "/checkwallets":
+        if not cfg:
+            return "افتح «المحفظة» أول مرة."
+        import solana_live as chain
+        count = chain.check_child_signers(cfg["wallet"], BATCH)
+        return (f"نجح فحص التوقيع: {count}/{N} محفظة فرعية.\n"
+                "تم التحقق محلياً من تواقيع معاملات تجميع التوكنات إلى الرئيسية. "
+                "الفحص ما بيبث أي معاملة وما بيخصم رسوم.")
     if action == "/wallets" and cfg:
         import solana_live as chain
         master, children = chain.keys()
@@ -336,9 +344,8 @@ def step(db, row, chain):
                 ix.extend([chain.create_ata(user,child,mint,program),
                            chain.transfer(user,child,mint,program,pieces[i],row["decimals"])])
             else:
-                ix.append(chain.transfer(child,user,mint,program,pieces[i],row["decimals"]))
-                if balances[i] == pieces[i]:
-                    ix.append(chain.close_ata(child,user,mint,program))
+                ix.extend(chain.collect_tokens(child,user,mint,program,pieces[i],row["decimals"],
+                                               balances[i] == pieces[i]))
                 signers.append(children[i])
         issue(db,row,chain,ix,signers)
         return

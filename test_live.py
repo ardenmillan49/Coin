@@ -120,3 +120,12 @@ class SignedBuilderTests(unittest.TestCase):
                     _, raw, _ = c.prepare(ix,[master,*children[:4]] if collect else [master])
                 tx = Transaction.from_bytes(base64.b64decode(raw))
                 tx.verify()
+
+    def test_all_child_signers_offline(self):
+        import solana_live as chain
+        with tempfile.TemporaryDirectory() as folder, patch.dict(os.environ, COIN_CONFIG_DIR=folder):
+            master, children = chain.keys(create=True)
+            with patch.object(bot, "rpc", side_effect=AssertionError("offline check used RPC")):
+                self.assertEqual(chain.check_child_signers(str(master.pubkey()), live.BATCH), 50)
+                with self.assertRaises(ValueError):
+                    chain.check_child_signers(str(children[0].pubkey()), live.BATCH)
