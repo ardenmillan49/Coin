@@ -1,4 +1,6 @@
 """SOL funding followed by purchases and sales signed by each child trader."""
+import time
+
 import bot
 
 COUNT = 50
@@ -9,6 +11,8 @@ MASTER_RESERVE = 2_000_000
 
 def init(db):
     db.executescript("""
+        CREATE TABLE IF NOT EXISTS market_samples (
+          campaign INTEGER PRIMARY KEY, tokens TEXT NOT NULL, sol TEXT NOT NULL, observed INTEGER NOT NULL);
         CREATE TABLE IF NOT EXISTS child_plans (
           campaign INTEGER PRIMARY KEY, allocation INTEGER, order_size INTEGER,
           next_cursor INTEGER, exit_basis INTEGER, exit_units INTEGER);
@@ -20,6 +24,10 @@ def init(db):
 
 def percentage_cap(balance, bps):
     return balance * bps // 10000
+
+
+def sale_estimate(token, sol, units):
+    return sol * units // (token + units) * 985 // 1000
 
 
 def overhead():
@@ -178,9 +186,15 @@ def step(db,row,chain,master,children,mint,notify):
     if not venue:
         return
     token,sol = venue[2:4]
+    now = int(time.time())
+    sample = db.execute("SELECT observed FROM market_samples WHERE campaign=?", (row["id"],)).fetchone()
+    if not sample or now - sample[0] >= 5:
+        with db:
+            db.execute("INSERT OR REPLACE INTO market_samples VALUES(?,?,?,?)",
+                       (row["id"], str(token), str(sol), now))
     if stage=="hold50":
         basis = row["spent"]
-        if sol*total//(token+total)*985//1000 >= (basis*(10000+row["target"])+9999)//10000 + COUNT*10000:
+        if sale_estimate(token, sol, total) >= (basis*(10000+row["target"])+9999)//10000 + COUNT*10000:
             with db:
                 db.execute("UPDATE child_plans SET exit_basis=?,exit_units=? WHERE campaign=?",(basis,total,row["id"]))
                 db.execute("UPDATE campaigns SET stage='sell50',cursor=0 WHERE id=?",(row["id"],))

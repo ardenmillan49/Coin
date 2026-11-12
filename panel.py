@@ -1,6 +1,7 @@
 """Persistent inline Telegram dashboard."""
 from decimal import Decimal
 import bot
+import dashboard
 import live
 import sweep
 import withdrawals
@@ -8,7 +9,7 @@ import withdrawals
 HOME = [
     [("الميزانية", "budget"), ("هدف الربح", "target")],
     [("المحفظة", "/wallet"), ("فحص الجاهزية", "/ready")],
-    [("شراء حقيقي", "/buy"), ("حالة التداول", "/live")],
+    [("شراء حقيقي", "/buy"), ("لوحة الصفقة 📊", "/live")],
     [("بيع حقيقي الآن", "/exit"), ("إلغاء طلب الشراء", "/unarm")],
     [("فحص المحافظ الـ50", "/checkwallets"), ("تجميع SOL", "sweep")],
     [("سحب SOL", "withdraw"), ("المحاكاة", "paper")],
@@ -37,6 +38,8 @@ def state(db, key):
 
 
 def buttons(view, draft=""):
+    if view == "dashboard":
+        return [[("تحديث", "/live"), ("بيع حقيقي الآن", "/exit")], [("رجوع", "home")]]
     if view=="sweep_review":
         return [[("تأكيد التجميع","collect:"+draft),("إلغاء","home")]]
     if view.startswith("withdraw_"):
@@ -63,6 +66,9 @@ def render(db, key, note):
     view = current["view"]
     title = "Coin · المحاكاة" if view == "paper" else "Coin · التداول الحقيقي"
     text = f"{title}\n\nالميزانية: {budget}\nهدف الربح للبيع: {target}"
+    if view == "dashboard":
+        row = db.execute("SELECT * FROM campaigns WHERE bot=? ORDER BY id DESC LIMIT 1", (key,)).fetchone()
+        text = dashboard.summary(db, row, live.STAGES)
     if view in FIELDS:
         text += f"\n\n{FIELDS[view]}: {current['draft'] or '…'}"
     if view == "withdraw_address":
@@ -117,6 +123,9 @@ def handle(db,key,action,callback):
     view = current["view"]
     if callback and action not in {v for row in buttons(view,current["draft"]) for _,v in row}:
         return "اللوحة تغيّرت. اختار من الأزرار الظاهرة."
+    if action == "/live":
+        home(db,key,"dashboard")
+        return ""
     if action in ("/start","/help") or (callback and action in ("home","paper")):
         home(db,key,"paper" if action=="paper" else "home")
         return ""

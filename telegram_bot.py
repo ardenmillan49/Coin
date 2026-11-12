@@ -120,7 +120,12 @@ def sol(units):
 
 def command(db, row, text):
     key = row["id"]
+    entering = db.execute("SELECT 1 FROM live_settings WHERE bot=? AND prompt='mint'", (key,)).fetchone()
     result = live.command(db, key, text)
+    if entering:
+        trade = live.active(db, key)
+        if trade and trade["mint"] == text.strip():
+            panel.home(db,key,"dashboard")
     if result is not None:
         db.execute("UPDATE telegram SET stage=NULL,draft=NULL WHERE id=?", (key,))
         return result
@@ -350,6 +355,7 @@ def show_panel(db, key, token, reply):
 
 
 def poll(db, key, token, secret):
+    next_refresh = 0
     while True:
         try:
             tick(db, key)
@@ -359,10 +365,12 @@ def poll(db, key, token, secret):
                     print("Telegram account paired.", flush=True)
                     continue
                 print("Send /start and enter the numeric ID from the reply.", flush=True)
+            delivered = False
             for reply in db.execute("SELECT * FROM replies WHERE bot_id=? ORDER BY id", (key,)).fetchall():
                 try:
                     if reply["chat"] == owner:
                         show_panel(db,key,token,reply)
+                        delivered = True
                     else:
                         api(token,"sendMessage",chat_id=reply["chat"],text=reply["text"])
                 except TelegramError as exc:
@@ -371,6 +379,13 @@ def poll(db, key, token, secret):
                     print(f"Telegram skipped undeliverable reply ({exc.code}).", flush=True)
                 with db:
                     db.execute("DELETE FROM replies WHERE id=?", (reply["id"],))
+            if delivered:
+                next_refresh = time.monotonic() + 5
+            elif owner and time.monotonic() >= next_refresh:
+                next_refresh = time.monotonic() + 5
+                viewing = db.execute("SELECT 1 FROM panels WHERE bot=? AND view='dashboard' AND message IS NOT NULL", (key,)).fetchone()
+                if viewing and live.active(db,key):
+                    show_panel(db,key,token,{"chat":owner,"text":""})
             for item in db.execute("SELECT * FROM input_cleanup WHERE bot=?", (key,)).fetchall():
                 try:
                     api(token,"deleteMessage",chat_id=item["chat"],message_id=item["message"])
