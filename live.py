@@ -2,6 +2,7 @@
 from decimal import Decimal, InvalidOperation
 import bot
 import sweep
+import wallet_trades
 import withdrawals
 import time
 
@@ -10,13 +11,15 @@ BATCH = 4
 FEE_MARGIN = 2_000_000
 ACTIONS = {"محفظة SOL": "/wallet", "إعداد شراء حقيقي": "/plan", "شراء حقيقي": "/buy",
            "حالة التداول الحقيقي": "/live", "بيع حقيقي الآن": "/exit", "إلغاء طلب الشراء": "/unarm"}
-STAGES = {"planned": "بانتظار العقد", "buy": "بانتظار الشراء", "split": "توزيع",
+STAGES = {"plan50":"فحص الإطلاق", "fund50":"تمويل المحافظ بـ SOL", "buy50":"شراء من الفرعيات",
+          "hold50":"مراقبة هدف المحافظ", "sell50":"بيع من الفرعيات", "planned": "بانتظار العقد", "buy": "بانتظار الشراء", "split": "توزيع",
           "hold": "مراقبة الهدف", "collect": "تجميع للبيع", "sell": "بيع", "done": "مكتملة"}
 
 
 def init(db):
     withdrawals.init(db)
     sweep.init(db)
+    wallet_trades.init(db)
     db.executescript("""
         CREATE TABLE IF NOT EXISTS live_settings (
             bot INTEGER PRIMARY KEY, wallet TEXT, budget INTEGER, target INTEGER, prompt TEXT);
@@ -99,7 +102,7 @@ def command(db, key, text):
             bot.largest_accounts("4a9ZHEceRAfHAribgXDsdYxfR1hqf6MrRQja9caQpump",chain.FINAL)
         except OSError:
             return "تعذّر فحص الحيازات عبر المسارات المتاحة. اضبط SOLANA_HOLDERS_RPC_URL بمزوّد يدعم getTokenLargestAccounts في /etc/coin-bot.env ثم أعد تشغيل الخدمة."
-        reserve = reserve_for_distribution()
+        reserve = N * wallet_trades.overhead() + wallet_trades.MASTER_RESERVE
         check = "فحص التوقيع متاح بعد التمويل."
         if balance >= 5000:
             from solders.compute_budget import set_compute_unit_limit
@@ -116,7 +119,7 @@ def command(db, key, text):
         latest = row or db.execute("SELECT * FROM campaigns WHERE bot=? ORDER BY id DESC LIMIT 1", (key,)).fetchone()
         return status(latest) if latest else "ما في صفقة حقيقية."
     if action == "/unarm":
-        if row and row["stage"] == "buy" and not row["pending"]:
+        if row and row["stage"] in ("buy","plan50") and not row["pending"]:
             db.execute("UPDATE campaigns SET stage='done',error='تم إلغاء الشراء' WHERE id=?", (row["id"],))
         db.execute("UPDATE live_settings SET prompt=NULL WHERE bot=?", (key,))
         return "تم إلغاء الإدخال. الصفقة المرسلة أو المفتوحة بتضل مسجّلة."
@@ -126,7 +129,7 @@ def command(db, key, text):
         db.execute("UPDATE campaigns SET error='' WHERE id=?", (row["id"],))
         return "تم استئناف المتابعة."
     if action == "/exit":
-        if not row or row["stage"] not in ("split", "hold", "collect", "sell"):
+        if not row or row["stage"] not in ("split", "hold", "collect", "sell","fund50","buy50","hold50","sell50"):
             return "ما في صفقة حقيقية مفتوحة للبيع."
         db.execute("UPDATE campaigns SET manual=1,error='' WHERE id=?", (row["id"],))
         return "تم طلب البيع اليدوي بسعر السوق مع حد انزلاق 3%."
@@ -163,10 +166,10 @@ def command(db, key, text):
         return status(row)
     if withdrawals.pending(db) or sweep.running(db):
         return "في سحب قيد التأكيد. انتظر نتيجته قبل الشراء."
-    db.execute("INSERT INTO campaigns(bot,wallet,mint,budget,target,stage) VALUES(?,?,?,?,?,'buy')",
+    db.execute("INSERT INTO campaigns(bot,wallet,mint,budget,target,stage) VALUES(?,?,?,?,?,'plan50')",
                (key,cfg["wallet"],mint,cfg["budget"],cfg["target"]))
     db.execute("UPDATE live_settings SET prompt=NULL WHERE bot=?", (key,))
-    return "تم تفعيل الشراء الحقيقي. رح يوصلك تأكيد المعاملات."
+    return "تفعّل تمويل 50 محفظة بـ SOL والشراء من عناوينها. عند البيع بتبقى الحصيلة بالفرعيات حتى تطلب التجميع."
 
 
 def notify(db, row, message):
@@ -222,6 +225,13 @@ def receipt(db, row, meta):
                (spent,stage,cursor,units,locked,err,row["id"]))
 
 
+def settle_transaction(db,row,tx):
+    if row["stage"].endswith("50"):
+        wallet_trades.settle(db,row,tx,notify,sell_slippage)
+    else:
+        receipt(db,row,tx["meta"])
+
+
 def reconcile(db, row, chain):
     sig = row["pending"]
     result = bot.rpc("getSignatureStatuses", [[sig], {"searchTransactionHistory":True}])["value"][0]
@@ -230,14 +240,14 @@ def reconcile(db, row, chain):
             tx = bot.rpc("getTransaction", [sig, dict(chain.FINAL, encoding="jsonParsed",maxSupportedTransactionVersion=0)])
             if tx and tx.get("meta"):
                 with db:
-                    receipt(db,row,tx["meta"])
+                    settle_transaction(db,row,tx)
         return
     if bot.rpc("getBlockHeight", [chain.FINAL]) > row["expiry"]:
         # Check finalized history even if the status-cache lookup was inconclusive.
         tx = bot.rpc("getTransaction", [sig, dict(chain.FINAL, encoding="jsonParsed",maxSupportedTransactionVersion=0)])
         if tx and tx.get("meta"):
             with db:
-                receipt(db,row,tx["meta"])
+                settle_transaction(db,row,tx)
         elif not row["error"]:
             with db:
                 message = f"انتهت صلاحية المعاملة بدون إثبات تنفيذ. افحص التوقيع: {sig}. الإرسال المكرر متوقف."
@@ -295,6 +305,9 @@ def step(db, row, chain):
         return
     mint = chain.pk(row["mint"])
     stage = row["stage"]
+    if stage.endswith("50"):
+        wallet_trades.step(db,row,chain,master,children,mint,notify)
+        return
     if stage == "buy":
         chain.verify_mainnet()
         venue = chain.market(mint)
