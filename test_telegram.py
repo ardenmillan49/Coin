@@ -31,6 +31,10 @@ class TelegramTests(unittest.TestCase):
                            "chat": {"id": sender, "type": chat_type}, "from": {"id": sender}}})
 
             send(1, "/start", 2)
+            hint = db.execute("SELECT text FROM replies WHERE chat=2").fetchone()[0]
+            self.assertIn("رابط", hint)
+            self.assertNotIn("secret", hint)
+            self.assertIsNone(db.execute("SELECT owner FROM telegram").fetchone()[0])
             send(2, "/start secret", 2, "group")
             send(3, "/start secret")
             send(4, "مراقبة عملة", 2)

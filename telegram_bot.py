@@ -184,10 +184,11 @@ def receive(db, key, secret, update):
         if not text or chat.get("type") != "private" or sender != chat.get("id"):
             return
         if row["owner"] is None:
-            if text != "/start " + secret:
-                return
-            db.execute("UPDATE telegram SET owner=? WHERE id=?", (sender, key))
-            answer = "تم ربط حسابك. " + HELP
+            if text == "/start " + secret:
+                db.execute("UPDATE telegram SET owner=? WHERE id=?", (sender, key))
+                answer = "تم ربط حسابك. " + HELP
+            else:
+                answer = "البوت بانتظار الربط. افتح آخر رابط t.me كامل ظهر بطرفية السيرفر واضغط Start بتيليغرام."
         elif row["owner"] == sender:
             try:
                 answer = command(db, row, text)
@@ -254,9 +255,14 @@ def run_polling(config):
     while True:
         try:
             tick(db, key)
+            owner = db.execute("SELECT owner FROM telegram WHERE id=?", (key,)).fetchone()[0]
             for reply in db.execute("SELECT * FROM replies WHERE bot_id=? ORDER BY id", (key,)).fetchall():
-                api(token, "sendMessage", chat_id=reply["chat"], text=reply["text"],
-                    reply_markup={"keyboard": MENU, "resize_keyboard": True})
+                try:
+                    api(token, "sendMessage", chat_id=reply["chat"], text=reply["text"],
+                        reply_markup={"keyboard": MENU, "resize_keyboard": True} if reply["chat"] == owner else {})
+                except TelegramError as exc:
+                    if exc.code != 403:
+                        raise
                 with db:
                     db.execute("DELETE FROM replies WHERE id=?", (reply["id"],))
             row = db.execute("SELECT offset,mint FROM telegram WHERE id=?", (key,)).fetchone()
