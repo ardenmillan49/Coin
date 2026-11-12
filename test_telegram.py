@@ -87,7 +87,7 @@ class TelegramTests(unittest.TestCase):
         for i, op in enumerate(("budget","budget:0","budget:.","budget:5","budget:save",
                                 "target","target:1","target:0","target:0","target:save"),1):
             press(i,op)
-        self.assertEqual(tuple(db.execute("SELECT budget,target FROM live_settings").fetchone()),(500000000,10000))
+        self.assertEqual(tuple(db.execute("SELECT budget_bps,target FROM live_settings").fetchone()),(50,10000))
         self.assertIsNone(tg.live.active(db,123))
         press(11,"/buy",sender=4)
         press(12,"/buy",message=74)

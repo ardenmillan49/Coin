@@ -93,7 +93,7 @@ class LiveStateTests(unittest.TestCase):
         live.command(self.db,1,"إعداد شراء حقيقي")
         live.command(self.db,1,"0.75 100")
         settings = self.db.execute("SELECT * FROM live_settings").fetchone()
-        self.assertEqual((settings["budget"],settings["target"]),(750000000,10000))
+        self.assertEqual((settings["budget_bps"],settings["target"]),(75,10000))
         self.assertIn("عقد",live.command(self.db,1,"شراء حقيقي"))
         live.command(self.db,1,"/unarm")
         self.assertIsNone(self.db.execute("SELECT prompt FROM live_settings").fetchone()[0])

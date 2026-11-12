@@ -18,6 +18,10 @@ def init(db):
     """)
 
 
+def percentage_cap(balance, bps):
+    return balance * bps // 10000
+
+
 def overhead():
     # Reserve native-account rent, token ATA, volume accounts and potential WSOL ATA.
     return 5 * bot.rpc("getMinimumBalanceForRentExemption",[200]) + 20000
@@ -35,17 +39,21 @@ def start(db,row,chain,master,children,mint,notify):
     if not info or not curve:
         return
     report = bot.holder_report(str(mint),curve)
-    allocation = (row["budget"] - MASTER_RESERVE) // COUNT
+    balance = bot.rpc("getBalance", [str(master.pubkey()), chain.FINAL])["value"]
+    cap = row["budget"]
+    if row["budget_bps"]:
+        cap = min(cap, percentage_cap(balance, row["budget_bps"]))
+    allocation = (cap - MASTER_RESERVE) // COUNT
     order = allocation - overhead()
     if order <= 0:
         raise ValueError("الميزانية ما بتغطي احتياطي الحسابات الخمسين.")
-    if bot.rpc("getBalance",[str(master.pubkey()),chain.FINAL])["value"] < row["budget"]:
+    if balance < cap:
         raise ValueError("رصيد الرئيسية أقل من الميزانية.")
     if len(children) != COUNT or len({str(k.pubkey()) for k in children}) != COUNT:
         raise ValueError("عدد المحافظ الفرعية غير صحيح")
     with db:
-        changed = db.execute("""UPDATE campaigns SET stage='fund50',program=?,decimals=?
-                        WHERE id=? AND stage='plan50'""",(str(info[0]),info[1],row["id"]))
+        changed = db.execute("""UPDATE campaigns SET stage='fund50',program=?,decimals=?,budget=?
+                        WHERE id=? AND stage='plan50'""",(str(info[0]),info[1],cap,row["id"]))
         if not changed.rowcount:
             return
         db.execute("INSERT INTO child_plans(campaign,allocation,order_size) VALUES(?,?,?)",

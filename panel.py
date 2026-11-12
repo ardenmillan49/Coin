@@ -18,7 +18,7 @@ PAPER = [
     [("حالة الصفقة", "/status"), ("بيع تجريبي", "/sell")],
     [("إلغاء المراقبة", "/cancel"), ("رجوع", "home")],
 ]
-FIELDS = {"budget": "الميزانية بـ SOL", "target": "هدف الربح للبيع (%)"}
+FIELDS = {"budget": "نسبة الشراء من رصيد الرئيسية (%)", "target": "هدف الربح للبيع (%)"}
 
 
 def init(db):
@@ -49,14 +49,16 @@ def buttons(view, draft=""):
     if view not in FIELDS:
         return PAPER if view == "paper" else HOME
     rows = [[(d, view + ":" + d) for d in digits] for digits in ("123", "456", "789", ".0")]
+    if view == "budget":
+        rows.insert(0, [(f"{pct}%", f"budget:pct{pct}") for pct in (50, 80, 100)])
     rows[-1].append(("⌫", view + ":del"))
     return rows + [[("حفظ", view + ":save"), ("رجوع", "home")]]
 
 
 def render(db, key, note):
     current = state(db, key)
-    cfg = db.execute("SELECT budget,target FROM live_settings WHERE bot=?", (key,)).fetchone()
-    budget = str(Decimal(cfg[0]) / bot.LAMPORTS) + " SOL" if cfg and cfg[0] else "غير محددة"
+    cfg = db.execute("SELECT budget_bps,target FROM live_settings WHERE bot=?", (key,)).fetchone()
+    budget = f"{Decimal(cfg[0]) / 100}% من رصيد الرئيسية" if cfg and cfg[0] else "غير محددة"
     target = f"+{Decimal(cfg[1])/100}%" if cfg and cfg[1] else "غير محدد"
     view = current["view"]
     title = "Coin · المحاكاة" if view == "paper" else "Coin · التداول الحقيقي"
@@ -99,8 +101,8 @@ def save(db,key,view,value):
         raise ValueError("في صفقة حقيقية قيد التنفيذ.")
     value = value.strip().replace("٫",".").replace(",",".").rstrip("٪%")
     if view == "budget":
-        number = bot.sol_amount(value)
-        db.execute("UPDATE live_settings SET budget=? WHERE bot=?", (number,key))
+        number = live.budget_percent(value)
+        db.execute("UPDATE live_settings SET budget=NULL,budget_bps=? WHERE bot=?", (number,key))
     else:
         number = Decimal(value) * 100
         if not number.is_finite() or not 1 <= number <= 1000000 or number != int(number):
@@ -173,6 +175,8 @@ def handle(db,key,action,callback):
         if callback:
             op = action.split(":",1)[1]
             draft = current["draft"]
+            if op.startswith("pct"):
+                return save(db,key,view,op[3:])
             if op=="save":
                 if not draft or draft==".":
                     return "أدخل القيمة أولاً."

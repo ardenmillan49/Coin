@@ -1,5 +1,7 @@
 """Persist every signed transaction before broadcast; advance only from finalized receipts."""
 from decimal import Decimal, InvalidOperation
+import json
+import urllib.request
 import bot
 import sweep
 import wallet_trades
@@ -33,6 +35,38 @@ def init(db):
             payer_delta INTEGER, network_fee INTEGER, success INTEGER);
         CREATE UNIQUE INDEX IF NOT EXISTS live_single ON campaigns((1)) WHERE stage != 'done';
     """)
+
+    for table in ("live_settings", "campaigns"):
+        if "budget_bps" not in {r[1] for r in db.execute(f"PRAGMA table_info({table})")}:
+            db.execute(f"ALTER TABLE {table} ADD COLUMN budget_bps INTEGER CHECK(budget_bps BETWEEN 1 AND 10000)")
+            if table == "live_settings":
+                db.execute("UPDATE live_settings SET prompt=NULL WHERE prompt IN ('mint','plan')")
+
+
+def budget_percent(text):
+    value = Decimal(text.strip().rstrip("%٪").replace("٫", ".").replace(",", "."))
+    if not value.is_finite() or not Decimal("0.01") <= value <= 100:
+        raise ValueError("أدخل نسبة بين 0.01% و100%.")
+    bps = value * 100
+    if bps != int(bps):
+        raise ValueError("استخدم منزلتين عشريتين كحد أقصى.")
+    return int(bps)
+
+
+def wallet_value(balance):
+    amount = Decimal(balance) / bot.LAMPORTS
+    text = f"الرصيد: {amount:f} SOL"
+    if not balance:
+        return text + " ≈ 0.00 USDT"
+    try:
+        url = "https://data-api.binance.vision/api/v3/ticker/price?symbol=SOLUSDT"
+        with urllib.request.urlopen(url, timeout=4) as response:
+            price = Decimal(json.load(response)["price"])
+        if not price.is_finite() or price <= 0:
+            raise ValueError("invalid price")
+        return text + f" ≈ {amount * price:.2f} USDT"
+    except (OSError, KeyError, ValueError, TypeError, InvalidOperation):
+        return text + " (سعر SOL مقابل USDT غير متاح حالياً)"
 
 
 def quantities(total):
@@ -73,7 +107,7 @@ def command(db, key, text):
         except OSError:
             return f"عنوان محفظة البوت على Solana:\n{wallet}\nتعذّر جلب الرصيد من RPC."
 
-        return f"عنوان محفظة التداول على Solana:\n{wallet}\nالرصيد {balance/1e9:g} SOL"
+        return f"عنوان محفظة التداول على Solana:\n{wallet}\n{wallet_value(balance)}"
     if action == "/checkwallets":
         if not cfg:
             return "افتح «المحفظة» أول مرة."
@@ -111,7 +145,7 @@ def command(db, key, text):
             if sim["err"]:
                 raise ValueError(f"فشل اختبار التوقيع: {sim['err']}")
             check = "نجحت محاكاة معاملة موقعة بدون بث."
-        funded = bool(cfg["budget"] and reserve < cfg["budget"] <= balance)
+        funded = bool(cfg["budget_bps"] and reserve < wallet_trades.percentage_cap(balance, cfg["budget_bps"]))
         return (f"اتصال Solana شغّال. تم التحقق من مفاتيح 50 محفظة. الرصيد {balance/1e9:g} SOL."
                 f" احتياطي الحسابات والرسوم المقدر {reserve/1e9:g} SOL. {check}"
                 + (" الميزانية مغطّاة." if funded else " اضبط الميزانية والتمويل قبل الشراء."))
@@ -140,11 +174,11 @@ def command(db, key, text):
             return status(row)
         if action == "/plan":
             db.execute("UPDATE live_settings SET prompt='plan' WHERE bot=?", (key,))
-            return "ابعت ميزانيتك الإجمالية بـ SOL ونسبة الربح برسالة واحدة. مثال: 0.5 100"
-        if not cfg["budget"] or not cfg["target"]:
+            return "ابعت نسبة رصيد الرئيسية للشراء (%) ونسبة الربح برسالة واحدة. مثال: 50 100"
+        if not cfg["budget_bps"] or not cfg["target"]:
             return "اضبط حقلي «الميزانية» و«هدف الربح» أولاً."
         db.execute("UPDATE live_settings SET prompt='mint' WHERE bot=?", (key,))
-        return f"ابعت عقد Pump.fun لتفعيل الشراء الحقيقي بحد {cfg['budget']/1e9:g} SOL وهدف +{cfg['target']/100:g}%."
+        return f"ابعت عقد Pump.fun لتفعيل الشراء الحقيقي بحد {cfg['budget_bps']/100:g}% من رصيد الرئيسية وهدف +{cfg['target']/100:g}%."
     if not cfg or not cfg["prompt"]:
         return None
     if text.startswith("/") or text in ("مراقبة عملة","فحص عملة","حالة الصفقة","بيع تجريبي","إلغاء المراقبة"):
@@ -154,11 +188,11 @@ def command(db, key, text):
         parts = text.split()
         if len(parts) != 2:
             raise ValueError("اكتب الميزانية ثم نسبة الهدف")
-        budget = bot.sol_amount(parts[0])
+        budget = budget_percent(parts[0])
         pct = Decimal(parts[1].rstrip("%")) * 100
         if not pct.is_finite() or not 1 <= pct <= 1000000 or pct != int(pct):
             raise ValueError("نسبة الهدف بين 0.01% و10000%")
-        db.execute("UPDATE live_settings SET budget=?,target=?,prompt=NULL WHERE bot=?", (budget,int(pct),key))
+        db.execute("UPDATE live_settings SET budget=NULL,budget_bps=?,target=?,prompt=NULL WHERE bot=?", (budget,int(pct),key))
         return "انحفظت الخطة لـ 50 محفظة. وقت الإطلاق اضغط «شراء حقيقي» وابعت العقد."
     import solana_live as chain
     mint = str(chain.pk(text.strip()))
@@ -166,8 +200,15 @@ def command(db, key, text):
         return status(row)
     if withdrawals.pending(db) or sweep.running(db):
         return "في سحب قيد التأكيد. انتظر نتيجته قبل الشراء."
-    db.execute("INSERT INTO campaigns(bot,wallet,mint,budget,target,stage) VALUES(?,?,?,?,?,'plan50')",
-               (key,cfg["wallet"],mint,cfg["budget"],cfg["target"]))
+    if not cfg["budget_bps"]:
+        return "حدّد نسبة الميزانية قبل الشراء."
+    balance = bot.rpc("getBalance", [cfg["wallet"], chain.FINAL])["value"]
+    cap = wallet_trades.percentage_cap(balance, cfg["budget_bps"])
+    if cap <= wallet_trades.MASTER_RESERVE + N * wallet_trades.overhead():
+        return "النسبة المحددة ما بتغطي احتياطي المحافظ الخمسين. ما تم تفعيل الشراء."
+    db.execute("""INSERT INTO campaigns(bot,wallet,mint,budget,target,budget_bps,stage)
+                  VALUES(?,?,?,?,?,?,'plan50')""",
+               (key,cfg["wallet"],mint,cap,cfg["target"],cfg["budget_bps"]))
     db.execute("UPDATE live_settings SET prompt=NULL WHERE bot=?", (key,))
     return "تفعّل تمويل 50 محفظة بـ SOL والشراء من عناوينها. عند البيع بتبقى الحصيلة بالفرعيات حتى تطلب التجميع."
 
